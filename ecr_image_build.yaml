@@ -1,0 +1,72 @@
+name: CICD CPU pipeline
+on:
+  push:
+    branches:
+      - "master"
+jobs:
+  CI:
+    env:
+      AUTHOR: 정찬양
+      PROJECT: TEST_IMAGE_BUILD_WITH_ECR
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v1
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-northeast-2
+      - name: Calculate HEAD commit of git history 
+        id: vars
+        shell: bash
+        run: |
+          echo "##[set-output name=branch;]$(echo ${GITHUB_REF#refs/heads/})"
+          echo "::set-output name=sha_short::$(git rev-parse --short=8 HEAD)"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v1
+        with:
+          buildkitd-flags: --debug
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+      - name: Build, tag, and push image to Amazon ECR
+        uses: docker/build-push-action@v2
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: neuralworks/neural-framework
+          IMAGE_TAG: cpu
+        with:
+          context: .
+          file: deployment/Dockerfiles/cpu/Dockerfile
+          push: true
+          tags: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}-latest,
+                ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}-${{ steps.vars.outputs.sha_short }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Ping to update neural inference 
+        run: |
+          echo ${{ steps.vars.outputs.branch }}
+          run_rul=$(curl -u ":${{ secrets.GH_API_TOKEN }}" \
+              -H "Accept: application/vnd.github.v3+json" \
+              https://api.github.com/repos/Neuralworks-io/neural-inference/actions/workflows/11928360/runs\?branch\=${GITHUB_REF#refs/heads/}\&status\=success\&page=-1\&per_page=1 \
+              | jq -r ".workflow_runs[0].rerun_url")
+          echo $run_rul
+          curl -X POST \
+            -u ":${{ secrets.GH_API_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            $run_rul
+              
+      - name: "Slack result"
+        uses: 8398a7/action-slack@v3
+        with:
+          author_name: ${{ env.AUTHOR }}
+          username: ${{ env.PROJECT }}
+          status: ${{ job.status }}
+          fields: repo,message,commit,author,action,eventName,workflow,job,took
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          MATRIX_CONTEXT: ${{ toJson(matrix) }}
+        if: always()
